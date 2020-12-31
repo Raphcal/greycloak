@@ -139,16 +139,26 @@ public class Greycloak extends HttpServlet {
             response.setContent("{\"keys\":[{\"kid\":\"" + kid + "\",\"kty\":\"RSA\",\"alg\":\"RS256\",\"use\":\"sig\",\"n\":\"" + getPublicKey() + "\",\"e\":\"" + PUBLIC_EXPONENT + "\"}]}");
         } else if (authMatcher.matches()) {
             response.setContentType("text/html");
-            final String realm = authMatcher.group(1);
-            final Session session = new Session(realm);
-            sessions.put(session.getId(), session);
-            renewSessionCookie(response, session);
             final String redirectUri = queryParameters.get("redirect_uri");
             final String redirectFragment = queryParameters.get("redirect_fragment");
             final String state = queryParameters.get("state");
             final String nonce = queryParameters.get("nonce");
             final ResponseMode responseMode = ResponseMode.valueOf(queryParameters.getOrDefault("response_mode", "query").toUpperCase());
-            response.setContent(loginPage(realm, redirectUri, redirectFragment, state, nonce, responseMode));
+            try {
+                final Session session = getSession(request);
+                if (session != null) {
+                    session.setNonce(nonce);
+                    redirectWithCode(response, responseMode, session, redirectUri, redirectFragment, state);
+                    return;
+                }
+            } catch (IllegalArgumentException e) {
+                // Ignored.
+            }
+            final String realm = authMatcher.group(1);
+            final Session session = new Session(realm);
+            sessions.put(session.getId(), session);
+            renewSessionCookie(response, session);
+            response.setContent(loginPage(realm.toUpperCase(), redirectUri, redirectFragment, state, nonce, responseMode));
         } else if (logoutMatcher.matches()) {
             final Session session = getSession(request);
             if (session != null) {
@@ -198,20 +208,7 @@ public class Greycloak extends HttpServlet {
             // TODO: Retrieve the account selected in the login page.
             session.setAccount(ACCOUNTS.get(0));
             final ResponseMode responseMode = ResponseMode.valueOf(formValues.getOrDefault("response_mode", "query").toUpperCase());
-            final String redirectUri = formValues.get("redirect_uri");
-            final String redirectFragment = formValues.get("redirect_fragment");
-            final String state = formValues.get("state");
-            final String code = session.generateCode();
-            String url = redirectUri;
-            if (redirectFragment != null) {
-                url += (url.indexOf(responseMode.getStart()) >= 0 ? '&' : responseMode.getStart()) + "redirect_fragment=" + redirectFragment;
-            }
-            url += (url.indexOf(responseMode.getStart()) >= 0 ? '&' : responseMode.getStart()) + "state=" + state;
-            url += "&code=" + code;
-            response.setStatusCode(302);
-            response.setStatusMessage("Found");
-            response.setHeader("Location", url);
-            renewSessionCookie(response, session);
+            redirectWithCode(response, responseMode, session, formValues.get("redirect_uri"), formValues.get("redirect_fragment"), formValues.get("state"));
         } else if (tokenMatcher.matches()) {
             allowCrossOrigin(request, response);
             try {
@@ -243,6 +240,20 @@ public class Greycloak extends HttpServlet {
     private void notFound(HttpResponse response) {
         response.setStatusCode(404);
         response.setStatusMessage("Not Found");
+    }
+
+    private void redirectWithCode(HttpResponse response, ResponseMode responseMode, Session session, String redirectUri, String redirectFragment, String state) {
+        final String code = session.generateCode();
+        String url = redirectUri;
+        if (redirectFragment != null) {
+            url += (url.indexOf(responseMode.getStart()) >= 0 ? '&' : responseMode.getStart()) + "redirect_fragment=" + redirectFragment;
+        }
+        url += (url.indexOf(responseMode.getStart()) >= 0 ? '&' : responseMode.getStart()) + "state=" + state;
+        url += "&code=" + code;
+        response.setStatusCode(302);
+        response.setStatusMessage("Found");
+        response.setHeader("Location", url);
+        renewSessionCookie(response, session);
     }
 
     private Map<String, String> parseURLEncodedValues(String encodedValues) throws UnsupportedEncodingException {
