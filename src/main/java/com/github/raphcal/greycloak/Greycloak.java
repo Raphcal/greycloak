@@ -2,13 +2,13 @@ package com.github.raphcal.greycloak;
 
 import com.github.raphcal.greycloak.model.ResponseMode;
 import com.github.raphcal.greycloak.model.Session;
-import com.github.raphcal.greycloak.util.Pointer;
 import com.github.raphcal.greycloak.model.Account;
 import com.github.raphcal.greycloak.jwt.JWT;
 import com.github.raphcal.greycloak.jwt.JWTPayload;
 import com.github.raphcal.greycloak.model.Token;
 import com.github.raphcal.greycloak.jwt.JWTHeader;
 import com.github.raphcal.greycloak.util.Maps;
+import com.github.raphcal.localserver.HttpConstants;
 import com.github.raphcal.localserver.HttpRequest;
 import com.github.raphcal.localserver.HttpResponse;
 import com.github.raphcal.localserver.HttpServlet;
@@ -35,7 +35,6 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -63,6 +62,8 @@ public class Greycloak extends HttpServlet {
      * Duration in seconds before session cookie timeout (9 hours).
      */
     private static final int COOKIE_EXPIRE = 60 * 60 * 9;
+
+    private static final String BEARER_AUTHORIZATION_TYPE = "Bearer";
 
     /**
      * User accounts.
@@ -368,10 +369,11 @@ public class Greycloak extends HttpServlet {
                 : "";
     }
 
-    private Session getSession(HttpRequest request) throws UnsupportedEncodingException {
+    private Session getSession(HttpRequest request) throws IOException, NoSuchAlgorithmException, InvalidKeyException, SignatureException {
         final Matcher realmMatcher = realmPattern.matcher(request.getTarget());
         final String realm = realmMatcher.lookingAt() ? realmMatcher.group(1) : "realm";
 
+        // Get session from grant type.
         final Map<String, String> values = parseFormValues(request);
         final String grantType = values.get("grant_type");
         if (grantType != null) switch (grantType) {
@@ -409,7 +411,21 @@ public class Greycloak extends HttpServlet {
             default:
                 throw new IllegalArgumentException("Unsupported grant type: " + grantType);
         }
-        final String cookieHeader = request.getHeader("Cookie");
+        final String authorization = request.getHeader(HttpConstants.HEADER_AUTHORIZATION);
+        if (authorization != null && authorization.substring(0, BEARER_AUTHORIZATION_TYPE.length()).equalsIgnoreCase(BEARER_AUTHORIZATION_TYPE)) {
+            final String accessToken = authorization.substring(BEARER_AUTHORIZATION_TYPE.length() + 1);
+            final JWT jwt = JWT.fromJson(accessToken);
+            if (!jwt.isSignatureValid(keyPair.getPublic()) || jwt.hasExpired()) {
+                throw new IllegalArgumentException("Bad access token");
+            }
+            final String username = jwt.getPayload().getPreferredUsername();
+            return sessions.values().stream()
+                    .filter(session -> username.equals(session.getAccount().getUsername()))
+                    .findAny()
+                    .orElseThrow(() -> new IllegalArgumentException("Session not found"));
+        }
+
+        final String cookieHeader = request.getHeader(HttpConstants.HEADER_COOKIE);
         if (cookieHeader != null) {
             final List<Cookie> cookies;
             try {
@@ -453,7 +469,7 @@ public class Greycloak extends HttpServlet {
 
         final JWTPayload accessTokenPayload = createJWTPayload(session, subject, Token.ACCESS_TOKEN_EXPIRE);
         accessTokenPayload.setAudience("account");
-        accessTokenPayload.setType("Bearer");
+        accessTokenPayload.setType(BEARER_AUTHORIZATION_TYPE);
         accessTokenPayload.setNonce(session.getNonce());
         accessTokenPayload.setAllowedOrigins(new String[]{
             "http://localhost:4200",

@@ -9,6 +9,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.InvalidKeyException;
 import java.security.NoSuchAlgorithmException;
 import java.security.PrivateKey;
+import java.security.PublicKey;
 import java.security.Signature;
 import java.security.SignatureException;
 import java.util.Base64;
@@ -75,11 +76,26 @@ public class JWT {
         this.payload = payload;
     }
 
+    public JWTHeader getHeader() {
+        return header;
+    }
+
+    public JWTPayload getPayload() {
+        return payload;
+    }
+
     public void signUsing(PrivateKey key) throws NoSuchAlgorithmException, InvalidKeyException, SignatureException {
         final Signature rsaSignature = Signature.getInstance("SHA256withRSA");
         rsaSignature.initSign(key);
         rsaSignature.update((encodePart(header) + '.' + encodePart(payload)).getBytes(StandardCharsets.UTF_8));
         this.signature = rsaSignature.sign();
+    }
+
+    public boolean isSignatureValid(PublicKey key) throws NoSuchAlgorithmException, InvalidKeyException, SignatureException {
+        final Signature rsaSignature = Signature.getInstance("SHA256withRSA");
+        rsaSignature.initVerify(key);
+        rsaSignature.update((encodePart(header) + '.' + encodePart(payload)).getBytes(StandardCharsets.UTF_8));
+        return rsaSignature.verify(signature);
     }
 
     public String toJson() {
