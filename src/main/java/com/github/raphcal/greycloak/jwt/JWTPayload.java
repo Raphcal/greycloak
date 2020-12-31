@@ -1,4 +1,4 @@
-package com.github.raphcal.greycloak;
+package com.github.raphcal.greycloak.jwt;
 
 import com.google.gson.annotations.SerializedName;
 import java.util.Map;

@@ -1,4 +1,4 @@
-package com.github.raphcal.greycloak;
+package com.github.raphcal.greycloak.util;
 
 /**
  * Pointeur sur une variable.

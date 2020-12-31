@@ -1,10 +1,20 @@
 package com.github.raphcal.greycloak;
 
+import com.github.raphcal.greycloak.model.ResponseMode;
+import com.github.raphcal.greycloak.model.Session;
+import com.github.raphcal.greycloak.util.Pointer;
+import com.github.raphcal.greycloak.model.Account;
+import com.github.raphcal.greycloak.jwt.JWT;
+import com.github.raphcal.greycloak.jwt.JWTPayload;
+import com.github.raphcal.greycloak.model.Token;
+import com.github.raphcal.greycloak.jwt.JWTHeader;
+import com.github.raphcal.greycloak.util.Maps;
 import com.github.raphcal.localserver.HttpRequest;
 import com.github.raphcal.localserver.HttpResponse;
 import com.github.raphcal.localserver.HttpServlet;
 import com.github.raphcal.logdorak.Logger;
 import com.google.gson.Gson;
+import com.google.gson.reflect.TypeToken;
 import java.io.IOException;
 import java.io.UnsupportedEncodingException;
 import java.math.BigInteger;
@@ -19,14 +29,17 @@ import java.security.SignatureException;
 import java.security.interfaces.RSAPublicKey;
 import java.security.spec.RSAKeyGenParameterSpec;
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 import javax.ws.rs.core.Cookie;
 import org.jboss.resteasy.util.CookieParser;
 
@@ -45,11 +58,22 @@ public class Greycloak extends HttpServlet {
     private static final int KEY_SIZE = 2048;
 
     private static final String SESSION_COOKIE_NAME = "KEYCLOAK_SESSION";
+
     /**
-     * Durée avant l'expiration du cookie de session (9 heures).
+     * Duration in seconds before session cookie timeout (9 hours).
      */
     private static final int COOKIE_EXPIRE = 60 * 60 * 9;
 
+    /**
+     * User accounts.
+     * TODO: Load accounts from an external source.
+     */
+    private static final List<Account> ACCOUNTS = Arrays.asList(
+            new Account("u031458", "foobar", "Alain", "Dupont-Mine", "alain.dupont-mine@something.fr", true, Maps.typedMap(new TypeToken<List<String>>() {},
+                    "createTimestamp", Arrays.asList("20160921071016.0Z")))
+    );
+
+    private final Pattern realmPattern = Pattern.compile('^' + CONTEXT + "/realms/([a-zA-Z0-9-]+)/");
     private final Pattern openIdConfigurationPattern = Pattern.compile('^' + CONTEXT + "/realms/([a-zA-Z0-9-]+)/.well-known/openid-configuration/?$");
     private final Pattern certificatesPattern = Pattern.compile('^' + CONTEXT + "/realms/([a-zA-Z0-9-]+)/protocol/openid-connect/certs/?$");
     private final Pattern authPattern = Pattern.compile('^' + CONTEXT + "/realms/([a-zA-Z0-9-]+)/protocol/openid-connect/auth/?$");
@@ -136,12 +160,8 @@ public class Greycloak extends HttpServlet {
         } else if (accountMatcher.matches()) {
             allowCrossOrigin(request, response);
             response.setContentType("application/json");
-            final JWTPayload payload = new JWTPayload();
-            payload.setName("Alain Dupont-Mine");
-            payload.setGivenName("Alain");
-            payload.setFamilyName("Dupont-Mine");
-            payload.setUsername("U031458");
-            response.setContent(gson.toJson(payload));
+            final Session session = getSession(request);
+            response.setContent(gson.toJson(session.getAccount()));
         } else {
             notFound(response);
         }
@@ -174,6 +194,8 @@ public class Greycloak extends HttpServlet {
                 sessions.put(session.getId(), session);
             }
             session.setNonce(formValues.get("nonce"));
+            // TODO: Retrieve the account selected in the login page.
+            session.setAccount(ACCOUNTS.get(0));
             final ResponseMode responseMode = ResponseMode.valueOf(formValues.getOrDefault("response_mode", "query").toUpperCase());
             final String redirectUri = formValues.get("redirect_uri");
             final String redirectFragment = formValues.get("redirect_fragment");
@@ -191,25 +213,18 @@ public class Greycloak extends HttpServlet {
             renewSessionCookie(response, session);
         } else if (tokenMatcher.matches()) {
             allowCrossOrigin(request, response);
-            final Session session = getSession(request);
-            if (session == null) {
+            try {
+                final Session session = getSession(request);
+                final Token token = createToken(session);
+                session.addRefreshToken(token.getRefreshToken());
+                renewSessionCookie(response, session);
+                response.setContentType("application/json");
+                response.setContent(gson.toJson(token));
+            } catch (IllegalArgumentException e) {
                 response.setStatusCode(401);
                 response.setStatusMessage("Unauthorized");
-                response.setContent("Session does not exists or is inactive");
-                return;
+                response.setContent(e.getLocalizedMessage());
             }
-            final Pointer<String> reason = new Pointer<>();
-            if (!isGrantValid(session, response, request, reason)) {
-                response.setStatusCode(401);
-                response.setStatusMessage("Unauthorized");
-                response.setContent(reason.get());
-                return;
-            }
-            final Token token = createToken(session);
-            session.addRefreshToken(token.getRefreshToken());
-            renewSessionCookie(response, session);
-            response.setContentType("application/json");
-            response.setContent(gson.toJson(token));
         } else {
             notFound(response);
         }
@@ -256,7 +271,9 @@ public class Greycloak extends HttpServlet {
 
     private void allowCrossOrigin(HttpRequest request, HttpResponse response) {
         final String origin = request.getHeader("Origin");
-        response.setHeader("Access-Control-Allow-Origin", origin);
+        if (origin != null) {
+            response.setHeader("Access-Control-Allow-Origin", origin);
+        }
         response.setHeader("Access-Control-Allow-Methods", "GET,POST");
         response.setHeader("Access-Control-Allow-Headers", "Authorization");
         response.setHeader("Access-Control-Allow-Credentials", "true");
@@ -275,6 +292,7 @@ public class Greycloak extends HttpServlet {
     }
 
     private String loginPage(String realm, String redirectUri, String redirectFragment, String state, String nonce, ResponseMode responseMode) {
+        // TODO: Add an account selector in the login page.
         return "<!DOCTYPE html>\n"
                 + "<html lang=\"en\">\n"
                 + "<head>\n"
@@ -350,20 +368,65 @@ public class Greycloak extends HttpServlet {
                 : "";
     }
 
-    private Session getSession(HttpRequest request) {
-        final List<Cookie> cookies;
-        try {
-            cookies = CookieParser.parseCookies(request.getHeader("Cookie"));
-        } catch (IllegalArgumentException e) {
-            LOGGER.error("Erreur lors de la recherche du cookie de session", e);
-            return null;
+    private Session getSession(HttpRequest request) throws UnsupportedEncodingException {
+        final Matcher realmMatcher = realmPattern.matcher(request.getTarget());
+        final String realm = realmMatcher.lookingAt() ? realmMatcher.group(1) : "realm";
+
+        final Map<String, String> values = parseFormValues(request);
+        final String grantType = values.get("grant_type");
+        if (grantType != null) switch (grantType) {
+            case "authorization_code":
+                final String code = values.get("code");
+                return (code != null ? sessions.values().stream() : Stream.<Session>empty())
+                        .filter(session -> session.isCodeValid(code))
+                        .findAny()
+                        .orElseThrow(() -> new IllegalArgumentException("Bad code"));
+            case "refresh_token":
+                final String refreshToken = values.get("refresh_token");
+                return (refreshToken != null ? sessions.values().stream() : Stream.<Session>empty())
+                        .filter(session -> session.isRefreshTokenValid(refreshToken))
+                        .findAny()
+                        .orElseThrow(() -> new IllegalArgumentException("Given refresh token is invalid, has expired or has been revoked"));
+            case "password":
+                final String username = values.get("username");
+                final String password = values.get("password");
+                if (username == null || password == null) {
+                    throw new IllegalArgumentException("password grant type require username and password");
+                }
+                final Account account = ACCOUNTS.stream()
+                        .filter(anAccount -> username.equals(anAccount.getUsername()) && password.equals(anAccount.getPassword()))
+                        .findAny()
+                        .orElseThrow(() -> new IllegalArgumentException("No account found for given username and password"));
+
+                return sessions.values().stream()
+                        .filter(session -> account.equals(session.getAccount()))
+                        .findAny()
+                        .orElseGet(() -> {
+                            final Session session = new Session(realm);
+                            sessions.put(session.getId(), session);
+                            return session;
+                        });
+            default:
+                throw new IllegalArgumentException("Unsupported grant type: " + grantType);
         }
-        for (final Cookie cookie : cookies) {
-            if (SESSION_COOKIE_NAME.equals(cookie.getName())) {
-                final String value = cookie.getValue();
-                final int separatorIndex = value.indexOf('/');
-                if (separatorIndex > 0) {
-                    return sessions.get(value.substring(separatorIndex + 1));
+        final String cookieHeader = request.getHeader("Cookie");
+        if (cookieHeader != null) {
+            final List<Cookie> cookies;
+            try {
+                cookies = CookieParser.parseCookies(cookieHeader);
+            } catch (IllegalArgumentException e) {
+                LOGGER.error("Erreur lors de la recherche du cookie de session", e);
+                return null;
+            }
+            for (final Cookie cookie : cookies) {
+                if (SESSION_COOKIE_NAME.equals(cookie.getName())) {
+                    final String value = cookie.getValue();
+                    if (value.startsWith(realm)) {
+                        final Session session = sessions.get(value.substring(realm.length() + 1));
+                        if (session != null) {
+                            return session;
+                        }
+                    }
                 }
             }
         }
@@ -377,36 +440,18 @@ public class Greycloak extends HttpServlet {
         return parseURLEncodedValues(request.getContent());
     }
 
-    private boolean isGrantValid(Session session, HttpResponse response, HttpRequest request, Pointer<String> reason) throws IOException {
-        final Map<String, String> values = parseFormValues(request);
-        final String grantType = values.get("grant_type");
-        if ("authorization_code".equals(grantType)) {
-            final String code = values.get("code");
-            if (code == null || !session.isCodeValid(code)) {
-                reason.assign("Bad code");
-            }
-        } else if ("refresh_token".equals(grantType)) {
-            if (!session.isRefreshTokenValid(values.get("refresh_token"))) {
-                reason.assign("Given refresh token is invalid, has expired or has been revoked");
-            }
-        } else {
-            reason.assign("Bad grant type");
-        }
-        return reason.isNull();
-    }
-
     private Token createToken(Session session) throws NoSuchAlgorithmException, InvalidKeyException, SignatureException {
         final String subject = UUID.randomUUID().toString();
 
         final JWTHeader header = new JWTHeader("RS256", "JWT", kid);
 
-        final JWTPayload refreshTokenPayload = createJWTPayload(session.getRealm(), subject, Token.REFRESH_TOKEN_EXPIRE);
+        final JWTPayload refreshTokenPayload = createJWTPayload(session, subject, Token.REFRESH_TOKEN_EXPIRE);
         refreshTokenPayload.setType("ID");
         refreshTokenPayload.setNonce(session.getNonce());
         final JWT refreshToken = new JWT(header, refreshTokenPayload);
         refreshToken.signUsing(keyPair.getPrivate());
 
-        final JWTPayload accessTokenPayload = createJWTPayload(session.getRealm(), subject, Token.ACCESS_TOKEN_EXPIRE);
+        final JWTPayload accessTokenPayload = createJWTPayload(session, subject, Token.ACCESS_TOKEN_EXPIRE);
         accessTokenPayload.setAudience("account");
         accessTokenPayload.setType("Bearer");
         accessTokenPayload.setNonce(session.getNonce());
@@ -442,22 +487,23 @@ public class Greycloak extends HttpServlet {
         return token;
     }
 
-    private JWTPayload createJWTPayload(final String realm, final String subject, int expiration) {
+    private JWTPayload createJWTPayload(final Session session, final String subject, int expiration) {
+        final Account account = session.getAccount();
         final JWTPayload payload = new JWTPayload();
         payload.setJwtIdentifier(UUID.randomUUID().toString());
         payload.setSessionState(UUID.randomUUID().toString());
         payload.setExpiration(Instant.now().plusSeconds(expiration).getEpochSecond());
         payload.setIssuedAt(Instant.now().getEpochSecond());
         payload.setAuthorizedTime(Instant.now().getEpochSecond());
-        payload.setIssuer("http://localhost:9080/auth/realms/" + realm);
+        payload.setIssuer("http://localhost:9080/auth/realms/" + session.getRealm());
         payload.setAudience("you");
         payload.setAuthorizationContextClass("1");
         payload.setEmailVerified(Boolean.FALSE);
         payload.setSubject(subject);
-        payload.setName("Alain Dupont-Mine");
-        payload.setGivenName("Alain");
-        payload.setFamilyName("Dupont-Mine");
-        payload.setPreferredUsername("U031458");
+        payload.setName(account.getFirstName() + ' ' + account.getLastName());
+        payload.setGivenName(account.getFirstName());
+        payload.setFamilyName(account.getLastName());
+        payload.setPreferredUsername(account.getUsername());
         return payload;
     }
 

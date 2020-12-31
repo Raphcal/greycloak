@@ -1,5 +1,7 @@
-package com.github.raphcal.greycloak;
+package com.github.raphcal.greycloak.model;
 
+import com.github.raphcal.greycloak.jwt.JWT;
+import com.github.raphcal.logdorak.Logger;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Iterator;
@@ -11,8 +13,11 @@ import java.util.UUID;
  * @author Raphaël Calabro (raphael.calabro.external2@banque-france.fr)
  */
 public class Session {
+    private static final Logger LOGGER = new Logger(Session.class);
+
     private final String realm;
     private final String id = UUID.randomUUID().toString();
+    private Account account;
     private final List<String> codes = new ArrayList<>();
     private final List<String> validRefreshTokens = new ArrayList<>();
     private String nonce;
@@ -21,12 +26,20 @@ public class Session {
         this.realm = realm;
     }
 
+    public String getId() {
+        return id;
+    }
+
     public String getRealm() {
         return realm;
     }
 
-    public String getId() {
-        return id;
+    public Account getAccount() {
+        return account;
+    }
+
+    public void setAccount(Account account) {
+        this.account = account;
     }
 
     public String getNonce() {
@@ -51,18 +64,23 @@ public class Session {
         validRefreshTokens.add(refreshToken);
     }
 
-    public boolean isRefreshTokenValid(String refreshToken) throws IOException {
+    public boolean isRefreshTokenValid(String refreshToken) {
         if (refreshToken == null) {
             return false;
         }
         final Iterator<String> iterator = validRefreshTokens.iterator();
         while (iterator.hasNext()) {
             final String validRefreshToken = iterator.next();
-            final JWT token = JWT.fromJson(validRefreshToken);
-            if (token.hasExpired()) {
+            try {
+                final JWT token = JWT.fromJson(validRefreshToken);
+                if (token.hasExpired()) {
+                    iterator.remove();
+                } else if (validRefreshToken.equals(refreshToken)) {
+                    return true;
+                }
+            } catch (IOException e) {
+                LOGGER.error("Unable to read given refresh token : " + validRefreshToken, e);
                 iterator.remove();
-            } else if (validRefreshToken.equals(refreshToken)) {
-                return true;
             }
         }
         return false;
